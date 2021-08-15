@@ -58,7 +58,7 @@ if __name__ == '__main__':
 
     print("Input Weight:")
     print("W = %.4f, b = %.4f" % (W, b))
-
+    
     print("Final Weight:")
     W = model.layers[0].get_weights()[0]
     b = model.layers[0].get_weights()[1]
