@@ -5,3 +5,7 @@
 # python c file
 *.pyc
 *.ipynb_checkpoints
+
+**/training_checkpoints/**
+
+test.py
