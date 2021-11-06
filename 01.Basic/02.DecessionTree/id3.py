@@ -38,9 +38,10 @@ def entropy_of_one_division(division):
     classes = set(division)
     for c in classes:   # for each class, get entropy
         n_c = sum(division==c)
-        e = n_c*1.0/n * entropy_cal(sum(division==c), sum(division!=c)) # weighted avg
+        e = n_c * 1.0 / n * entropy_cal(sum(division==c), sum(division!=c)) # weighted avg
         s += e
     return s, n
+
 
 def entropy_cal(c1, c2):
     """
