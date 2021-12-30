@@ -29,7 +29,7 @@ class PredictionLayer(nn.Module):
 
 
 class DNN(nn.Module):
-    def __init__(self, inputs_dim, hidden_units, use_bn=False,
+    def __init__(self, inputs_dim, hidden_units, use_bn=True,
                  dropout_rate=0., device='cpu'):
         super(DNN, self).__init__()
         self.dropout_rate = dropout_rate
@@ -56,7 +56,7 @@ class DNN(nn.Module):
             if self.use_bn:
                 x = self.bn[i](x)
 
-            x = F.relu(x)
+            x = torch.tanh(x)
             x = self.dropout(x)
 
         return x
@@ -120,6 +120,14 @@ class DSSM(nn.Module):
         score = self.similarity_layer(user_out, item_out)
         output = self.output_layer(score)
         return output
+
+    def generate_user_embedding(self, user_inputs):
+        user_inputs = user_inputs.long()
+        return self.user_model(user_inputs)
+
+    def generate_item_embedding(self, item_inputs):
+        item_inputs = item_inputs.long()
+        return self.item_model(item_inputs)
 
 
 
