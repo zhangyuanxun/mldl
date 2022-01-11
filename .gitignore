@@ -4,6 +4,8 @@
 
 # python c file
 *.pyc
+*.npy
+*.pkl
 *.ipynb_checkpoints
 
 **/training_checkpoints/**
