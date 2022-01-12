@@ -10,7 +10,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 import datetime
 import torch.nn as nn
 import pickle
-from feature_columns import SparseFeat, DenseFeat
+from feature_columns import SparseFeat, DenseFeat, SeqSparseFeat
 
 pd.set_option('display.max_rows', None)
 pd.set_option('display.max_columns', None)
@@ -18,6 +18,7 @@ pd.set_option('display.width', None)
 pd.set_option('display.max_colwidth', None)
 
 RATING_FILE_PATH_TRAIN = "../../../00.Datasets/02.RS/01.MovieLen/sample/movielens_sample.csv"
+
 
 def auc(y_pred, y_true):
     pred = y_pred.data.cpu()
@@ -32,61 +33,118 @@ def acc(y_pred, y_true):
     return accuracy_score(y, pred)
 
 
+def pad_sequences(sequences, maxlen=None, dtype='int32',
+                  padding='pre', truncating='pre', value=0.):
+    if not hasattr(sequences, '__len__'):
+        raise ValueError('`sequences` must be iterable.')
+    num_samples = len(sequences)
+
+    lengths = []
+    sample_shape = ()
+    flag = True
+
+    # take the sample shape from the first non empty sequence
+    # checking for consistency in the main loop below.
+
+    for x in sequences:
+        try:
+            lengths.append(len(x))
+            if flag and len(x):
+                sample_shape = np.asarray(x).shape[1:]
+                flag = False
+        except TypeError:
+            raise ValueError('`sequences` must be a list of iterables. '
+                             'Found non-iterable: ' + str(x))
+
+    if maxlen is None:
+        maxlen = np.max(lengths)
+
+    is_dtype_str = np.issubdtype(dtype, np.str_) or np.issubdtype(dtype, np.unicode_)
+    if isinstance(value, str) and dtype != object and not is_dtype_str:
+        raise ValueError("`dtype` {} is not compatible with `value`'s type: {}\n"
+                         "You should set `dtype=object` for variable length strings."
+                         .format(dtype, type(value)))
+
+    x = np.full((num_samples, maxlen) + sample_shape, value, dtype=dtype)
+    for idx, s in enumerate(sequences):
+        if not len(s):
+            continue  # empty list/array was found
+        if truncating == 'pre':
+            trunc = s[-maxlen:]
+        elif truncating == 'post':
+            trunc = s[:maxlen]
+        else:
+            raise ValueError('Truncating type "%s" '
+                             'not understood' % truncating)
+
+        # check `trunc` has expected shape
+        trunc = np.asarray(trunc, dtype=dtype)
+        if trunc.shape[1:] != sample_shape:
+            raise ValueError('Shape of sample %s of sequence at position %s '
+                             'is different from expected shape %s' %
+                             (trunc.shape[1:], idx, sample_shape))
+
+        if padding == 'post':
+            x[idx, :len(trunc)] = trunc
+        elif padding == 'pre':
+            x[idx, -len(trunc):] = trunc
+        else:
+            raise ValueError('Padding type "%s" not understood' % padding)
+    return x
+
+
 def generate_train_test_dataset(data, neg_sample=0, test_ratio=0.1):
     data.sort_values("timestamp", inplace=True)
     item_ids = data['movie_id'].unique()
 
     train_set = []
     test_set = []
-
     for user_id, row in tqdm(data.groupby('user_id')):
         pos_list = row['movie_id'].tolist()
         rating_list = row['rating'].tolist()
-
+        rating_list = [1 if rating > 3 else 0 for rating in rating_list]
         if neg_sample > 0:
             candidate_set = list(set(item_ids) - set(pos_list))
             neg_list = np.random.choice(candidate_set, size=len(pos_list) * neg_sample, replace=True)
 
-        # num_train = int(len(pos_list) * (1 - test_ratio))
-        # num_train = 1 if num_train == 0 else num_train
-        num_train = len(pos_list) - 1 if len(pos_list) > 1 else 1
-        for i in range(num_train):
-            if rating_list[i] >= 3:
-                train_set.append([user_id, pos_list[i], 1])
-            else:
-                train_set.append([user_id, pos_list[i], 0])
+        for i in range(1, len(pos_list)):
+            hist = pos_list[:i]
 
-        for i in range(num_train, len(pos_list)):
-            if rating_list[i] >= 3:
-                test_set.append([user_id, pos_list[i], 1])
-            else:
-                test_set.append([user_id, pos_list[i], 0])
+            if i != len(pos_list) - 1:
+                train_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]), rating_list[i]])
 
-        for i in range(len(neg_list)):
-            train_set.append([user_id, neg_list[i], 0])
+                for j in range(neg_sample):
+                    train_set.append([user_id, neg_list[i * neg_sample + j],  hist[::-1], len(hist[::-1]), 0])
+            else:
+                test_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]), rating_list[i]])
 
     random.shuffle(train_set)
     random.shuffle(test_set)
-
     print(len(train_set), len(test_set))
 
     return train_set, test_set
 
 
-def generate_feature(dataset, user_profile, item_profile, batch_size):
-    data_uid = np.array([line[0] for line in dataset])  # user_id
-    data_iid = np.array([line[1] for line in dataset])  # item_id
-    data_gender = user_profile.loc[data_uid]['gender'].values  # gender
-    data_age = user_profile.loc[data_uid]['age'].values  # age
-    data_occupation = user_profile.loc[data_uid]['occupation'].values  # occupation
-    data_zip = user_profile.loc[data_uid]['zip'].values  # zip
-    data_label = np.array([line[2] for line in dataset])  # label
+def generate_feature(dataset, user_profile, item_profile, batch_size, max_seq_len):
+    user_id = np.array([line[0] for line in dataset])            # user_id
+    item_id = np.array([line[1] for line in dataset])            # item_id
+    his_seq = [line[2] for line in dataset]                      # history sequence item id
+    hist_seq_len = np.array([line[3] for line in dataset])       # history sequence item length
+    label = np.array([line[4] for line in dataset])              # label
+    gender = user_profile.loc[user_id]['gender'].values          # gender
+    age = user_profile.loc[user_id]['age'].values                # age
+    occupation = user_profile.loc[user_id]['occupation'].values  # occupation
+    zip = user_profile.loc[user_id]['zip'].values                # zip
 
-    assert len(data_uid) == len(data_iid) == len(data_label) == len(data_gender) \
-           == len(data_occupation) == len(data_zip) == len(data_age)
+    assert len(user_id) == len(item_id) == len(label) == len(gender) \
+           == len(occupation) == len(zip) == len(age)
 
-    X = np.stack((data_uid, data_gender, data_occupation, data_zip, data_age, data_iid), axis=1)
-    y = data_label
+    his_seq_padded = pad_sequences(his_seq, maxlen=max_seq_len, padding='post', truncating='post', value=0)
+
+    # Note, put user features before item feature
+    X = np.stack((user_id, gender, occupation, zip, age), axis=1)
+    X = np.concatenate((X, his_seq_padded, item_id.reshape(-1, 1)), axis=1)
+    y = label
 
     dataset = TensorDataset(torch.tensor(X).float(), torch.tensor(y).float())
     dataset = DataLoader(dataset, shuffle=True, batch_size=batch_size)
@@ -97,7 +155,7 @@ def main():
     data = pd.read_csv(RATING_FILE_PATH_TRAIN)
     neg_sample = 3
     batch_size = 128
-
+    max_seq_len = 50
     sparse_features = ['user_id', 'movie_id', 'gender', 'occupation', 'zip']
     dense_features = ['age']
     print(data.head(10))
@@ -125,13 +183,15 @@ def main():
     train_set, test_set = generate_train_test_dataset(data, neg_sample)
 
     print("Generate train and test features...")
-    train_dataloader = generate_feature(train_set, user_profile, item_profile, batch_size)
-    test_dataloader = generate_feature(test_set, user_profile, item_profile, batch_size)
+    train_dataloader = generate_feature(train_set, user_profile, item_profile, batch_size, max_seq_len)
+    test_dataloader = generate_feature(test_set, user_profile, item_profile, batch_size, max_seq_len)
 
     print("Generate feature columns...")
     embedding_dim = 8
     user_feature_columns = [SparseFeat(feat, feature_max_id[feat], embedding_dim) for i, feat in enumerate(user_sparse_features)] \
-        + [DenseFeat(feat, 1) for i, feat in enumerate(user_dense_features)]
+        + [DenseFeat(feat, 1) for i, feat in enumerate(user_dense_features)] \
+        + [SeqSparseFeat(SparseFeat('user_hist', feature_max_id['movie_id'], embedding_dim, embedding_name='movie_id'),
+                         maxlen=max_seq_len,combiner='mean', length_name=None)]
 
     item_feature_columns = [SparseFeat(feat, feature_max_id[feat], embedding_dim) for i, feat in enumerate(item_sparse_features)]
 
@@ -143,7 +203,7 @@ def main():
     optimizer = torch.optim.Adagrad(params=model.parameters())
     metric_func = auc
     metric_name = 'auc'
-    epochs = 10
+    epochs = 3
     log_step_freq = 1000
 
     print('start_training.........')
