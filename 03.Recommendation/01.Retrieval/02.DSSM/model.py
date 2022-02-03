@@ -163,7 +163,7 @@ class PredictionLayer(nn.Module):
 
 
 class DNN(nn.Module):
-    def __init__(self, inputs_dim, hidden_units, use_bn=True,
+    def __init__(self, inputs_dim, hidden_units, use_bn=False,
                  dropout_rate=0., init_std=0.0001, device='cpu'):
         super(DNN, self).__init__()
         self.dropout_rate = dropout_rate
@@ -243,6 +243,9 @@ class UserModel(nn.Module):
 
         dnn_inputs = combine_inputs(embedding_inputs_list + seq_embedding_inputs_list, dense_inputs_list)
         output = self.dnn(dnn_inputs)
+
+        # normalization embedding
+        output = F.normalize(output, p=2, dim=1)
         return output
 
 
@@ -291,6 +294,9 @@ class ItemModel(nn.Module):
         dnn_inputs = combine_inputs(embedding_inputs_list + seq_embedding_inputs_list, dense_inputs_list)
 
         output = self.dnn(dnn_inputs)
+
+        # normalization embedding
+        output = F.normalize(output, p=2, dim=1)
         return output
 
 
@@ -319,9 +325,7 @@ class DSSM(nn.Module):
         return output
 
     def generate_user_embedding(self, user_inputs):
-        user_inputs = user_inputs.long()
         return self.user_model(user_inputs)
 
     def generate_item_embedding(self, item_inputs):
-        item_inputs = item_inputs.long()
         return self.item_model(item_inputs)

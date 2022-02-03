@@ -5,12 +5,14 @@ import numpy as np
 import random
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 import torch
-from model import DSSM
+from model import WideDeep
 from sklearn.metrics import roc_auc_score, accuracy_score
 import datetime
 import torch.nn as nn
 import pickle
 from feature_columns import SparseFeat, DenseFeat, SeqSparseFeat
+from sklearn.model_selection import train_test_split
+
 
 pd.set_option('display.max_rows', None)
 pd.set_option('display.max_columns', None)
@@ -93,34 +95,20 @@ def pad_sequences(sequences, maxlen=None, dtype='int32',
     return x
 
 
-def generate_train_test_dataset(data, neg_sample=0, test_ratio=0.1):
+def generate_train_test_dataset(data, test_ratio=0.2):
     data.sort_values("timestamp", inplace=True)
     item_ids = data['movie_id'].unique()
 
-    train_set = []
-    test_set = []
+    dataset = []
     for user_id, row in tqdm(data.groupby('user_id')):
         pos_list = row['movie_id'].tolist()
         rating_list = row['rating'].tolist()
-        rating_list = [1 if rating > 3 else 0 for rating in rating_list]
-        if neg_sample > 0:
-            candidate_set = list(set(item_ids) - set(pos_list))
-            neg_list = np.random.choice(candidate_set, size=len(pos_list) * neg_sample, replace=True)
-
+        rating_list = [1 if i > 3 else 0 for i in rating_list ]
         for i in range(1, len(pos_list)):
             hist = pos_list[:i]
+            dataset.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]), rating_list[i]])
 
-            if i != len(pos_list) - 1:
-                train_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]), rating_list[i]])
-
-                for j in range(neg_sample):
-                    train_set.append([user_id, neg_list[i * neg_sample + j],  hist[::-1], len(hist[::-1]), 0])
-            else:
-                test_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]), rating_list[i]])
-
-    random.shuffle(train_set)
-    random.shuffle(test_set)
-    print(len(train_set), len(test_set))
+    train_set, test_set = train_test_split(dataset, test_size=test_ratio, random_state=42, shuffle=True)
 
     return train_set, test_set
 
@@ -144,7 +132,7 @@ def generate_feature(dataset, user_profile, item_profile, batch_size, max_seq_le
     # Note, put user features before item feature
     X = np.stack((user_id, gender, occupation, zip, age), axis=1)
     X = np.concatenate((X, his_seq_padded, item_id.reshape(-1, 1)), axis=1)
-    y = label
+    y = label.reshape(-1, 1)
 
     dataset = TensorDataset(torch.tensor(X).float(), torch.tensor(y).float())
     dataset = DataLoader(dataset, shuffle=True, batch_size=batch_size)
@@ -153,7 +141,6 @@ def generate_feature(dataset, user_profile, item_profile, batch_size, max_seq_le
 
 def main():
     data = pd.read_csv(RATING_FILE_PATH_TRAIN)
-    neg_sample = 3
     batch_size = 128
     max_seq_len = 50
     sparse_features = ['user_id', 'movie_id', 'gender', 'occupation', 'zip']
@@ -180,7 +167,7 @@ def main():
     user_profile.set_index("user_id", drop=False, inplace=True)
 
     print("Generate train and test dataset...")
-    train_set, test_set = generate_train_test_dataset(data, neg_sample)
+    train_set, test_set = generate_train_test_dataset(data)
 
     print("Generate train and test features...")
     train_dataloader = generate_feature(train_set, user_profile, item_profile, batch_size, max_seq_len)
@@ -196,8 +183,7 @@ def main():
     item_feature_columns = [SparseFeat(feat, feature_max_id[feat], embedding_dim) for i, feat in enumerate(item_sparse_features)]
 
     # define model
-    model = DSSM(user_feature_columns=user_feature_columns,
-                 item_feature_columns=item_feature_columns)
+    model = WideDeep(feature_columns=user_feature_columns + item_feature_columns)
 
     loss_func = nn.BCELoss()
     optimizer = torch.optim.Adagrad(params=model.parameters(), lr=0.01)
@@ -221,10 +207,7 @@ def main():
 
             predictions = model(features)
             loss = loss_func(predictions, labels)
-            try:
-                metric = metric_func(predictions, labels)
-            except ValueError:
-                pass
+            metric = metric_func(predictions, labels)
 
             loss.backward()
             optimizer.step()
@@ -243,58 +226,14 @@ def main():
             with torch.no_grad():
                 predictions = model(features)
                 val_loss = loss_func(predictions, labels)
-                val_metric = acc(predictions, labels)
+                val_metric = metric_func(predictions, labels)
             val_loss_sum += val_loss.item()
             val_metric_sum += val_metric.item()
 
         info = (epoch, loss_sum / step, metric_sum / step)
-        print(("\nEPOCH=%d, val_loss=%.3f, " + "val_acc" + " = %.3f") % info)
+        print(("\nEPOCH=%d, val_loss=%.3f, " + "val_auc" + " = %.3f") % info)
         nowtime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print('\n' + '==========' * 8 + '%s' % nowtime)
-
-    item_inputs = item_profile['movie_id'].values.reshape(-1, 1)
-    user_inputs = user_profile.values
-
-    item_inputs_loader = DataLoader(torch.tensor(item_inputs).float(), batch_size=batch_size*4)
-    user_inputs_loader = DataLoader(torch.tensor(user_inputs).float(), batch_size=batch_size*4)
-
-    item_embeddings = torch.tensor([], device='cpu')
-    user_embeddings = torch.tensor([], device='cpu')
-
-    model.eval()
-    for batch_idx, item_input in enumerate(item_inputs_loader):
-        item_embed = model.generate_item_embedding(item_input)
-        item_embeddings = torch.cat((item_embeddings, item_embed), 0)
-
-    for batch_idx, user_input in enumerate(user_inputs_loader):
-        user_embed = model.generate_user_embedding(user_input)
-        user_embeddings = torch.cat((user_embeddings, user_embed), 0)
-
-    print(item_embeddings.shape)
-    print(user_embeddings.shape)
-
-    item_embedding_matrix = item_embeddings.data.cpu().numpy()
-    user_embedding_matrix = user_embeddings.data.cpu().numpy()
-
-    np.save("item_embedding_matrix.npy", item_embedding_matrix)
-    np.save("user_embedding_matrix.npy", user_embedding_matrix)
-
-    item_profile.reset_index(inplace=True, drop=True)
-    user_profile.reset_index(inplace=True, drop=True)
-    idx2userid = dict()
-    idx2itemid = dict()
-
-    for idx, row in item_profile.iterrows():
-        idx2itemid[idx] = row['movie_id']
-
-    for idx, row in user_profile.iterrows():
-        idx2userid[idx] = row['user_id']
-
-    with open("idx2userid.pkl", 'wb') as fp:
-        pickle.dump(idx2userid, fp)
-
-    with open("idx2itemid.pkl", 'wb') as fp:
-        pickle.dump(idx2itemid, fp)
 
 
 if __name__ == "__main__":
