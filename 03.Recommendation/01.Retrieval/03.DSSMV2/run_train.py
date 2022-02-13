@@ -21,8 +21,8 @@ RATING_FILE_PATH_TRAIN = "../../../00.Datasets/02.RS/01.MovieLen/sample/movielen
 
 
 def auc(y_pred, y_true):
-    pred = y_pred.data.cpu()
-    y = y_true.data.cpu()
+    pred = torch.flatten(y_pred).data.cpu()
+    y = torch.flatten(y_true).data.cpu()
     return roc_auc_score(y, pred)
 
 
@@ -93,7 +93,7 @@ def pad_sequences(sequences, maxlen=None, dtype='int32',
     return x
 
 
-def generate_train_test_dataset(data, neg_sample=3, test_ratio=0.1):
+def generate_train_test_dataset(data, neg_sample=0, test_ratio=0.1):
     data.sort_values("timestamp", inplace=True)
     item_ids = data['movie_id'].unique()
 
@@ -106,18 +106,17 @@ def generate_train_test_dataset(data, neg_sample=3, test_ratio=0.1):
         pos_list = [k for k, v in zip(pos_list, rating_list) if v > 0]
         if neg_sample > 0:
             candidate_set = list(set(item_ids) - set(pos_list))
-            neg_list = np.random.choice(candidate_set, size=len(pos_list) * neg_sample, replace=True)
+            neg_list = np.random.choice(candidate_set, size=len(pos_list) * neg_sample, replace=True).tolist()
 
         for i in range(1, len(pos_list)):
             hist = pos_list[:i]
 
             if i != len(pos_list) - 1:
-                train_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]), rating_list[i]])
-
-                for j in range(neg_sample):
-                    train_set.append([user_id, neg_list[i * neg_sample + j],  hist[::-1], len(hist[::-1]), 0])
+                train_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]),
+                                  neg_list[i * neg_sample: (i + 1) * neg_sample]])
             else:
-                test_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]), rating_list[i]])
+                test_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]),
+                                 neg_list[i * neg_sample: (i + 1) * neg_sample]])
 
     random.shuffle(train_set)
     random.shuffle(test_set)
@@ -128,28 +127,34 @@ def generate_train_test_dataset(data, neg_sample=3, test_ratio=0.1):
 
 def generate_feature(dataset, user_profile, item_profile, batch_size, max_seq_len):
     user_id = np.array([line[0] for line in dataset])            # user_id
-    item_id = np.array([line[1] for line in dataset])            # item_id
+    postive_samples = np.array([line[1] for line in dataset])            # positive samples
     his_seq = [line[2] for line in dataset]                      # history sequence item id
     hist_seq_len = np.array([line[3] for line in dataset])       # history sequence item length
-    label = np.array([line[4] for line in dataset])              # label
+    negative_samples = [line[4] for line in dataset]             # negative samples
+    label = [[1, 0, 0, 0] for line in dataset]                   # labels
     gender = user_profile.loc[user_id]['gender'].values          # gender
     age = user_profile.loc[user_id]['age'].values                # age
     occupation = user_profile.loc[user_id]['occupation'].values  # occupation
     zip = user_profile.loc[user_id]['zip'].values                # zip
 
-    assert len(user_id) == len(item_id) == len(label) == len(gender) \
+    assert len(user_id) == len(postive_samples) == len(label) == len(gender) \
            == len(occupation) == len(zip) == len(age)
 
     his_seq_padded = pad_sequences(his_seq, maxlen=max_seq_len, padding='post', truncating='post', value=0)
 
     # Note, put user features before item feature
     X = np.stack((user_id, gender, occupation, zip, age), axis=1)
-    X = np.concatenate((X, his_seq_padded, item_id.reshape(-1, 1)), axis=1)
+    X = np.concatenate((X, his_seq_padded, postive_samples.reshape(-1, 1), negative_samples), axis=1)
     y = label
 
     dataset = TensorDataset(torch.tensor(X).float(), torch.tensor(y).float())
     dataset = DataLoader(dataset, shuffle=True, batch_size=batch_size)
     return dataset
+
+
+def sample_softmax_loss(inputs, targets):
+    loss = torch.mean(-torch.log(inputs[0:, 0])) # get log likelihood of positive sample
+    return loss
 
 
 def main():
@@ -198,14 +203,14 @@ def main():
 
     # define model
     model = DSSM(user_feature_columns=user_feature_columns,
-                 item_feature_columns=item_feature_columns)
+                 item_feature_columns=item_feature_columns,
+                 num_negative=3)
 
-    loss_func = nn.BCELoss()
     optimizer = torch.optim.Adagrad(params=model.parameters(), lr=0.2)
     metric_func = auc
     metric_name = 'auc'
-    epochs = 3
-    log_step_freq = 1000
+    epochs = 100
+    log_step_freq = 200
 
     print('start_training.........')
     nowtime = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -220,12 +225,9 @@ def main():
         for step, (features, labels) in enumerate(train_dataloader, 1):
             optimizer.zero_grad()
 
-            out_pred, out_logits, cos_sim = model(features)
-            loss = loss_func(out_pred, labels)
-            try:
-                metric = metric_func(out_pred, labels)
-            except ValueError:
-                pass
+            out_pred = model(features)
+            loss = sample_softmax_loss(out_pred, labels)
+            metric = metric_func(out_pred, labels)
 
             loss.backward()
             optimizer.step()
@@ -242,9 +244,9 @@ def main():
 
         for val_step, (features, labels) in enumerate(test_dataloader, 1):
             with torch.no_grad():
-                out_pred, _, cos_sim = model(features)
-                val_loss = loss_func(out_pred, labels)
-                val_metric = acc(out_pred, labels)
+                out_pred = model(features)
+                val_loss = sample_softmax_loss(out_pred, labels)
+                val_metric = metric_func(out_pred, labels)
             val_loss_sum += val_loss.item()
             val_metric_sum += val_metric.item()
 

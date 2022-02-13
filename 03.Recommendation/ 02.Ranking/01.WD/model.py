@@ -62,6 +62,7 @@ def concat_fun(inputs, axis=-1):
         return torch.cat(inputs, dim=axis)
 
 
+
 def combine_inputs(sparse_inputs_list, dense_inputs_list):
     if len(sparse_inputs_list) > 0 and len(dense_inputs_list) > 0:
         sparse_dnn_input = torch.flatten(

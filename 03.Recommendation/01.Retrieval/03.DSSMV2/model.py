@@ -312,11 +312,12 @@ class ItemModel(nn.Module):
 
 
 class DSSM(nn.Module):
-    def __init__(self, user_feature_columns, item_feature_columns, device='cpu'):
+    def __init__(self, user_feature_columns, item_feature_columns, num_negative, device='cpu'):
         super(DSSM, self).__init__()
         self.device=device
         self.user_feature_columns = user_feature_columns
         self.item_feature_columns = item_feature_columns
+        self.num_negative = num_negative
 
         self.user_model = UserModel(self.user_feature_columns, [64, 32])
         self.item_model = ItemModel(self.item_feature_columns, [64, 32])
@@ -326,14 +327,22 @@ class DSSM(nn.Module):
 
     def forward(self, inputs):
         user_last_pos = next(reversed(self.user_model.feature_pos))
+        item_last_pos = next(reversed(self.item_model.feature_pos))
         user_inputs = inputs[:, :self.user_model.feature_pos[user_last_pos][1]]
         item_inputs = inputs[:, self.user_model.feature_pos[user_last_pos][1]:]
 
         user_out = self.user_model(user_inputs)
-        item_out = self.item_model(item_inputs)
-        score = self.similarity_layer(user_out, item_out)
-        output = self.output_layer(score)
-        return output
+        item_feature_len = self.item_model.feature_pos[item_last_pos][1]
+        cos_sim_scores = list()
+        for i in range(self.num_negative + 1):
+            item_out = self.item_model(item_inputs[:, i * item_feature_len: (i + 1) * item_feature_len])
+            score = self.similarity_layer(user_out, item_out)
+            cos_sim_scores.append(score.reshape(-1, 1))
+        cos_sim_scores = torch.cat(cos_sim_scores, dim=1)
+
+        # compute softmax for cosine similarity
+        probs = F.softmax(cos_sim_scores, dim=1)
+        return probs
 
     def generate_user_embedding(self, user_inputs):
         return self.user_model(user_inputs)
