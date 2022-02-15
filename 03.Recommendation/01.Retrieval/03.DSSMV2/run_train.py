@@ -11,6 +11,7 @@ import datetime
 import torch.nn as nn
 import pickle
 from feature_columns import SparseFeat, DenseFeat, SeqSparseFeat
+import torch.nn.functional as F
 
 pd.set_option('display.max_rows', None)
 pd.set_option('display.max_columns', None)
@@ -125,13 +126,13 @@ def generate_train_test_dataset(data, neg_sample=0, test_ratio=0.1):
     return train_set, test_set
 
 
-def generate_feature(dataset, user_profile, item_profile, batch_size, max_seq_len):
+def generate_feature(dataset, user_profile, item_profile, batch_size, max_seq_len, neg_sample):
     user_id = np.array([line[0] for line in dataset])            # user_id
     postive_samples = np.array([line[1] for line in dataset])            # positive samples
     his_seq = [line[2] for line in dataset]                      # history sequence item id
     hist_seq_len = np.array([line[3] for line in dataset])       # history sequence item length
     negative_samples = [line[4] for line in dataset]             # negative samples
-    label = [[1, 0, 0, 0] for line in dataset]                   # labels
+    label = [[1] + [0] * neg_sample for line in dataset]                   # labels
     gender = user_profile.loc[user_id]['gender'].values          # gender
     age = user_profile.loc[user_id]['age'].values                # age
     occupation = user_profile.loc[user_id]['occupation'].values  # occupation
@@ -153,13 +154,31 @@ def generate_feature(dataset, user_profile, item_profile, batch_size, max_seq_le
 
 
 def sample_softmax_loss(inputs, targets):
-    loss = torch.mean(-torch.log(inputs[0:, 0])) # get log likelihood of positive sample
+    inputs = F.softmax(inputs, dim=1)
+    loss = torch.mean(-torch.log(inputs[:, 0]))  # get log likelihood of positive sample - first column
+    return loss
+
+
+def bpr_loss(inputs, targets, neg_sample):
+    # bayesian personal ranking loss
+    positive = inputs[:, 0]
+    negative = inputs[:, 1: neg_sample + 1]
+
+    # # convert similarity to distance
+    # positive_dis = 1 - positive
+    # negative_dis = 1 - negative
+
+    positive = torch.repeat_interleave(positive, neg_sample).reshape(-1, neg_sample)
+
+    distance = positive - negative
+    loss = -torch.mean(torch.log(torch.sigmoid(distance)))
+
     return loss
 
 
 def main():
     data = pd.read_csv(RATING_FILE_PATH_TRAIN)
-    neg_sample = 3
+    neg_sample = 100
     batch_size = 128
     max_seq_len = 50
     sparse_features = ['user_id', 'movie_id', 'gender', 'occupation', 'zip']
@@ -189,8 +208,8 @@ def main():
     train_set, test_set = generate_train_test_dataset(data, neg_sample)
 
     print("Generate train and test features...")
-    train_dataloader = generate_feature(train_set, user_profile, item_profile, batch_size, max_seq_len)
-    test_dataloader = generate_feature(test_set, user_profile, item_profile, batch_size, max_seq_len)
+    train_dataloader = generate_feature(train_set, user_profile, item_profile, batch_size, max_seq_len, neg_sample)
+    test_dataloader = generate_feature(test_set, user_profile, item_profile, batch_size, max_seq_len, neg_sample)
 
     print("Generate feature columns...")
     embedding_dim = 8
@@ -202,14 +221,15 @@ def main():
     item_feature_columns = [SparseFeat(feat, feature_max_id[feat], embedding_dim) for i, feat in enumerate(item_sparse_features)]
 
     # define model
+    model_neg_sample = 5
     model = DSSM(user_feature_columns=user_feature_columns,
                  item_feature_columns=item_feature_columns,
-                 num_negative=3)
+                 num_negative=model_neg_sample)
 
-    optimizer = torch.optim.Adagrad(params=model.parameters(), lr=0.2)
+    optimizer = torch.optim.Adam(params=model.parameters(), lr=0.001)
     metric_func = auc
     metric_name = 'auc'
-    epochs = 100
+    epochs = 10
     log_step_freq = 200
 
     print('start_training.........')
@@ -223,10 +243,12 @@ def main():
         step = 1
 
         for step, (features, labels) in enumerate(train_dataloader, 1):
+            labels = labels[:, :(1 + model_neg_sample)]
             optimizer.zero_grad()
 
             out_pred = model(features)
-            loss = sample_softmax_loss(out_pred, labels)
+            # loss = sample_softmax_loss(out_pred, labels)
+            loss = bpr_loss(out_pred, labels, model_neg_sample)
             metric = metric_func(out_pred, labels)
 
             loss.backward()
@@ -243,9 +265,11 @@ def main():
         val_metric_sum = 0.0
 
         for val_step, (features, labels) in enumerate(test_dataloader, 1):
+            labels = labels[:, :(1 + model_neg_sample)]
             with torch.no_grad():
                 out_pred = model(features)
-                val_loss = sample_softmax_loss(out_pred, labels)
+                # val_loss = sample_softmax_loss(out_pred, labels)
+                val_loss = bpr_loss(out_pred, labels, model_neg_sample)
                 val_metric = metric_func(out_pred, labels)
             val_loss_sum += val_loss.item()
             val_metric_sum += val_metric.item()

@@ -107,7 +107,6 @@ def generate_train_test_dataset(data, neg_sample=3, test_ratio=0.1):
         if neg_sample > 0:
             candidate_set = list(set(item_ids) - set(pos_list))
             neg_list = np.random.choice(candidate_set, size=len(pos_list) * neg_sample, replace=True)
-
         for i in range(1, len(pos_list)):
             hist = pos_list[:i]
 

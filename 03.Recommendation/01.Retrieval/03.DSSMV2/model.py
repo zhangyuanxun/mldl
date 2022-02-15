@@ -340,9 +340,7 @@ class DSSM(nn.Module):
             cos_sim_scores.append(score.reshape(-1, 1))
         cos_sim_scores = torch.cat(cos_sim_scores, dim=1)
 
-        # compute softmax for cosine similarity
-        probs = F.softmax(cos_sim_scores, dim=1)
-        return probs
+        return cos_sim_scores
 
     def generate_user_embedding(self, user_inputs):
         return self.user_model(user_inputs)
