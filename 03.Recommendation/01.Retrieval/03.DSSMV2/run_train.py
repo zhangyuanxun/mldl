@@ -105,19 +105,22 @@ def generate_train_test_dataset(data, neg_sample=0, test_ratio=0.1):
         rating_list = row['rating'].tolist()
         rating_list = [1 if rating > 3 else 0 for rating in rating_list]
         pos_list = [k for k, v in zip(pos_list, rating_list) if v > 0]
-        if neg_sample > 0:
-            candidate_set = list(set(item_ids) - set(pos_list))
-            neg_list = np.random.choice(candidate_set, size=len(pos_list) * neg_sample, replace=True).tolist()
+        try:
+            if neg_sample > 0:
+                candidate_set = list(set(item_ids) - set(pos_list))
+                neg_list = np.random.choice(candidate_set, size=len(pos_list) * neg_sample, replace=True).tolist()
 
-        for i in range(1, len(pos_list)):
-            hist = pos_list[:i]
+            for i in range(1, len(pos_list)):
+                hist = pos_list[:i]
 
-            if i != len(pos_list) - 1:
-                train_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]),
-                                  neg_list[i * neg_sample: (i + 1) * neg_sample]])
-            else:
-                test_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]),
-                                 neg_list[i * neg_sample: (i + 1) * neg_sample]])
+                if i != len(pos_list) - 1:
+                    train_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]),
+                                      neg_list[i * neg_sample: (i + 1) * neg_sample]])
+                else:
+                    test_set.append([user_id, pos_list[i], hist[::-1], len(hist[::-1]),
+                                     neg_list[i * neg_sample: (i + 1) * neg_sample]])
+        except Exception:
+            continue
 
     random.shuffle(train_set)
     random.shuffle(test_set)
@@ -171,14 +174,14 @@ def bpr_loss(inputs, targets, neg_sample):
     positive = torch.repeat_interleave(positive, neg_sample).reshape(-1, neg_sample)
 
     distance = positive - negative
-    loss = -torch.mean(torch.log(torch.sigmoid(distance)))
+    loss = -torch.sum(torch.log(torch.sigmoid(distance)))
 
     return loss
 
 
 def main():
     data = pd.read_csv(RATING_FILE_PATH_TRAIN)
-    neg_sample = 100
+    neg_sample = 3
     batch_size = 128
     max_seq_len = 50
     sparse_features = ['user_id', 'movie_id', 'gender', 'occupation', 'zip']
@@ -221,7 +224,7 @@ def main():
     item_feature_columns = [SparseFeat(feat, feature_max_id[feat], embedding_dim) for i, feat in enumerate(item_sparse_features)]
 
     # define model
-    model_neg_sample = 5
+    model_neg_sample = 3
     model = DSSM(user_feature_columns=user_feature_columns,
                  item_feature_columns=item_feature_columns,
                  num_negative=model_neg_sample)
@@ -239,6 +242,7 @@ def main():
     for epoch in range(1, epochs + 1):
         model.train()
         loss_sum = 0.0
+        reg_loss_sum = 0.0
         metric_sum = 0.0
         step = 1
 
@@ -249,16 +253,21 @@ def main():
             out_pred = model(features)
             # loss = sample_softmax_loss(out_pred, labels)
             loss = bpr_loss(out_pred, labels, model_neg_sample)
+            reg_loss = model.get_embedding_regularization_loss()
+
+            loss += reg_loss
+
             metric = metric_func(out_pred, labels)
 
             loss.backward()
             optimizer.step()
 
             loss_sum += loss.item()
+            reg_loss_sum += reg_loss.item()
             metric_sum += metric.item()
             if step % log_step_freq == 0:
-                print(("[step=%d] loss: %.3f, " + metric_name + ": %.3f") % (
-                step, loss_sum / step, metric_sum / step));
+                print(("[step=%d] loss: %.3f, " + "reg loss: %.6f, " + metric_name + ": %.3f") % (
+                step, loss_sum / step, reg_loss / step, metric_sum / step));
 
         model.eval()
         val_loss_sum = 0.0
@@ -274,7 +283,7 @@ def main():
             val_loss_sum += val_loss.item()
             val_metric_sum += val_metric.item()
 
-        info = (epoch, loss_sum / step, metric_sum / step)
+        info = (epoch, val_loss_sum / val_step, val_metric_sum / val_step)
         print(("\nEPOCH=%d, val_loss=%.3f, " + "val_acc" + " = %.3f") % info)
         nowtime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print('\n' + '==========' * 8 + '%s' % nowtime)

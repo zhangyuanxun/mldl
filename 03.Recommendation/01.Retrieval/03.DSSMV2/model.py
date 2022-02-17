@@ -210,8 +210,39 @@ class DNN(nn.Module):
         return x
 
 
+def get_regularization_weight(weight_list, l1=0.0, l2=0.0):
+    if isinstance(weight_list, torch.nn.parameter.Parameter):
+        weight_list = [weight_list]
+    else:
+        weight_list = list(weight_list)
+    return list([(weight_list, l1, l2)])
+
+
+def get_regularization_loss(regularization_weight, device):
+    total_reg_loss = torch.zeros((1,), device=device)
+
+    for weight_list, l1, l2 in regularization_weight:
+        for w in weight_list:
+            if isinstance(w, tuple):
+                parameter = w[1]                  # named_parameters
+            else:
+                parameter = w
+
+            if l1 > 0:
+                total_reg_loss += torch.sum(l1 * torch.abs(parameter))
+
+            if l2 > 0:
+                try:
+                    total_reg_loss += torch.sum(l2 * torch.square(parameter))
+                except AttributeError:
+                    total_reg_loss += torch.sum(l2 * parameter * parameter)
+
+    return total_reg_loss
+
+
 class UserModel(nn.Module):
-    def __init__(self, user_feature_columns, hidden_units, embeddings_initializer_std=0.0001, device='cpu'):
+    def __init__(self, user_feature_columns, hidden_units, embeddings_initializer_std=1e-4, l2_reg_embedding=1e-3,
+                 device='cpu'):
         super(UserModel, self).__init__()
         self.device = device
         self.sparse_feature_columns = list(
@@ -230,6 +261,10 @@ class UserModel(nn.Module):
         # initialize the embedding weight
         for tensor in self.embedding_layers.values():
             nn.init.normal_(tensor.weight, mean=0.0, std=embeddings_initializer_std)
+
+        # add regularization_weight
+        self.regularization_weight = get_regularization_weight(self.embedding_layers.parameters(),
+                                                               l2=l2_reg_embedding)
 
         # compute input dimension
         inputs_dim = sum([feat.embedding_dim for i, feat in enumerate(self.sparse_feature_columns +
@@ -261,7 +296,8 @@ class UserModel(nn.Module):
 
 
 class ItemModel(nn.Module):
-    def __init__(self, item_feature_columns, hidden_units, embeddings_initializer_std=0.0001, device='cpu'):
+    def __init__(self, item_feature_columns, hidden_units, embeddings_initializer_std=1e-4,
+                 l2_reg_embedding=1e-3, device='cpu'):
         super(ItemModel, self).__init__()
         self.device = device
         self.sparse_feature_columns = list(
@@ -279,6 +315,10 @@ class ItemModel(nn.Module):
         # initialize the embedding weight
         for tensor in self.embedding_layers.values():
             nn.init.normal_(tensor.weight, mean=0.0, std=embeddings_initializer_std)
+
+        # add regularization_weight
+        self.regularization_weight = get_regularization_weight(self.embedding_layers.parameters(),
+                                                               l2=l2_reg_embedding)
 
         # compute input dimension
         inputs_dim = sum([feat.embedding_dim for i, feat in enumerate(self.sparse_feature_columns +
@@ -347,3 +387,9 @@ class DSSM(nn.Module):
 
     def generate_item_embedding(self, item_inputs):
         return self.item_model(item_inputs)
+
+    def get_embedding_regularization_loss(self):
+        user_model_reg_loss = get_regularization_loss(self.user_model.regularization_weight, self.device)
+        item_model_reg_loss = get_regularization_loss(self.item_model.regularization_weight, self.device)
+        return user_model_reg_loss[0] + item_model_reg_loss[0]
+

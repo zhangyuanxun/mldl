@@ -247,7 +247,7 @@ def main():
             val_loss_sum += val_loss.item()
             val_metric_sum += val_metric.item()
 
-        info = (epoch, loss_sum / step, metric_sum / step)
+        info = (epoch, val_loss_sum / step, val_metric_sum / step)
         print(("\nEPOCH=%d, val_loss=%.3f, " + "val_acc" + " = %.3f") % info)
         nowtime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print('\n' + '==========' * 8 + '%s' % nowtime)
